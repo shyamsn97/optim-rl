@@ -15,13 +15,13 @@ with open(path.join(this_directory, 'README.md'), encoding='utf-8') as f:
 setup(
     name="ezrl",
     version="0.1.0",
-    url="https://github.com/kragniz/cookiecutter-pypackage-minimal",
+    url="https://github.com/shyamsn97/ez-rl",
     license='MIT',
 
     author="Shyam Sudhakaran",
     author_email="shyamsnair@protonmail.com",
 
-    description="DUMB",
+    description="Easy, flexible, and modular RL components",
 
     long_description=long_description,
     long_description_content_type="text/markdown",
