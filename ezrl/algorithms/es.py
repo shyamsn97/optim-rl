@@ -34,7 +34,7 @@ def es_rollout(policy: GymPolicy, env_name: str = None, env=None, env_creation_f
             rewards.append(reward)
 
             observation = next_observation
-
+    env.close()
     return np.array(rewards)
 
 

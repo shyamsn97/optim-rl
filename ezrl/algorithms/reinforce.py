@@ -35,7 +35,7 @@ def reinforce_rollout(
             rewards.append(reward)
 
             observation = next_observation
-
+    env.close()
     return np.array(observations), np.array(actions), np.array(rewards)
 
 

@@ -28,6 +28,7 @@ def render(env: gym.Env, policy: GymPolicy):
 
             rendereds.append(rendered)
             rewards.append(reward)
+    env.close()
     return rendereds, rewards
 
 
