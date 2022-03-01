@@ -27,7 +27,7 @@ class RLOptimizer(metaclass=abc.ABCMeta):
         """
 
     @abc.abstractmethod
-    def step(self, *args, **kwargs) -> Any:
+    def step(self) -> Any:
         """
         Updates parameters
         """
@@ -39,3 +39,9 @@ class RLOptimizer(metaclass=abc.ABCMeta):
         Optional default rollout_fn for the algorithm.
         """
         return rollout_fn(*args, **kwargs)
+
+    def update(self, *args, **kwargs) -> Any:
+        self.zero_grad()
+        loss = self.loss_fn(*args, **kwargs)
+        loss.backward()
+        self.step()

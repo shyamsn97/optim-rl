@@ -1,6 +1,7 @@
 import os
 import time
 from datetime import datetime
+from typing import Any, Dict, Iterable, List  # noqa
 
 import gym
 import torch
@@ -42,3 +43,16 @@ def get_tensorboard_logger(
         "Follow tensorboard logs with: tensorboard --logdir '{}'".format(full_log_path)
     )
     return train_writer
+
+
+def flatten_list_of_dicts(
+    list_of_dicts: List[Dict[str, Iterable]]
+) -> Dict[str, Iterable]:
+    out = {}
+    for d in list_of_dicts:
+        for k in d:
+            if k not in out:
+                out[k] = list(d[k])
+            else:
+                out[k].extend(d[k])
+    return out

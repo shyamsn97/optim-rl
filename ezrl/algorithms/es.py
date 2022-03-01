@@ -162,7 +162,7 @@ class ESOptimizer(RLOptimizer):
         if pool is None:
             return (
                 [
-                    np.sum(rollout_fn(policy, *args, **kwargs))
+                    np.sum(rollout_fn(policy, *args, **kwargs)["rewards"])
                     for policy in self.policies
                 ],
                 epsilon,
@@ -172,7 +172,7 @@ class ESOptimizer(RLOptimizer):
             pool.starmap([tuple(policy, *args, **kwargs) for policy in self.policies])
         )
         return (
-            np.array([np.sum(r) for r in rewards]),
+            np.array([np.sum(r["rewards"]) for r in rewards]),
             epsilon,
             mean,
         )
