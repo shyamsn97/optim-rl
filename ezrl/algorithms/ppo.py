@@ -2,6 +2,7 @@ from typing import Any, Dict  # noqa
 
 import gym
 import numpy as np
+import scipy.signal
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
@@ -46,6 +47,22 @@ def ppo_rollout(
     }
 
 
+def discount_cumsum(x, discount):
+    """
+    magic from rllab for computing discounted cumulative sums of vectors.
+    input:
+        vector x,
+        [x0,
+         x1,
+         x2]
+    output:
+        [x0 + discount * x1 + discount^2 * x2,
+         x1 + discount * x2,
+         x2]
+    """
+    return scipy.signal.lfilter([1], [1, float(-discount)], x[::-1], axis=0)[::-1]
+
+
 class PPOOptimizer(RLOptimizer):
     def __init__(
         self,
@@ -79,14 +96,27 @@ class PPOOptimizer(RLOptimizer):
         self.optimizer = optim.Adam(self.policy.parameters(), lr=self.pi_lr)
 
     def calculate_advantages(
-        self, returns: np.array, values: np.array, normalize: bool = True
+        self,
+        returns: np.array,
+        values: np.array,
+        discount_factor: float,
+        normalize: bool = True,
     ):
 
         advantages = returns - values
 
+        adv = []
+        R = 0
+
+        for r in reversed(advantages):
+            R = r + R * discount_factor
+            adv.insert(0, R)
+
+        adv = np.squeeze(np.array(adv))
+
         if normalize:
-            advantages = (advantages - np.mean(advantages)) / np.std(advantages)
-        return advantages.squeeze()
+            adv = (adv - np.mean(adv)) / np.std(adv)
+        return adv
 
     def calculate_returns(
         self, rewards: np.array, discount_factor: float, normalize: bool = True
@@ -189,6 +219,10 @@ class PPOOptimizer(RLOptimizer):
                 )
             )
         for r in rollouts:
-            r["returns"] = self.calculate_returns(r["rewards"], self.gamma)
-            r["advantages"] = self.calculate_advantages(r["returns"], r["values"])
+            r["returns"] = self.calculate_returns(
+                r["rewards"], self.gamma, normalize=False
+            )
+            r["advantages"] = self.calculate_advantages(
+                r["returns"], r["values"], self.gamma, normalize=False
+            )
         return rollouts
