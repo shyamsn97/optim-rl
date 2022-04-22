@@ -56,7 +56,6 @@ class PPOOptimizer(RLOptimizer):
         gamma: float = 0.99,
         lam: float = 0.95,
         clip_ratio: float = 0.2,
-        train_pi_iters: int = 5,
         num_rollouts: int = 1,
     ):
         self.policy = policy
@@ -66,7 +65,6 @@ class PPOOptimizer(RLOptimizer):
         self.gamma = gamma
         self.lam = lam
         self.clip_ratio = clip_ratio
-        self.train_pi_iters = train_pi_iters
         self.num_rollouts = num_rollouts
         self.setup_optimizer()
 
@@ -104,7 +102,7 @@ class PPOOptimizer(RLOptimizer):
         returns = np.squeeze(np.array(returns))
 
         if normalize:
-            returns = (returns - np.mean(returns)) / np.std
+            returns = (returns - np.mean(returns)) / np.std(returns)
         return returns
 
     def value_loss(self, values, returns):
@@ -138,10 +136,9 @@ class PPOOptimizer(RLOptimizer):
         dist = out["dist"]
         log_probs = self.policy.log_prob(dist, actions)
         actor_loss = self.actor_loss(log_probs, old_log_probs, advantages)
-
         values = self.policy.critic(observations)
         value_loss = self.value_loss(values, returns)
-        loss = actor_loss + value_loss
+        loss = actor_loss + self.vf_coef * value_loss
         return loss, actor_loss, value_loss
 
     def step(self):
