@@ -103,14 +103,14 @@ class PPOOptimizer(RLOptimizer):
         normalize: bool = True,
     ):
 
-        advantages = returns - values
+        adv = returns - values
 
-        adv = []
-        R = 0
+        # adv = []
+        # R = 0
 
-        for r in reversed(advantages):
-            R = r + R * discount_factor
-            adv.insert(0, R)
+        # for r in reversed(advantages):
+        #     R = r + R * discount_factor
+        #     adv.insert(0, R)
 
         adv = np.squeeze(np.array(adv))
 
