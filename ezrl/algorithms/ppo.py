@@ -154,18 +154,15 @@ class PPOOptimizer(RLOptimizer):
         rewards: torch.Tensor,
         values: torch.Tensor,
         returns: Optional[torch.Tensor] = None,
-        advantages: Optional[torch.Tensor]  = None,
+        advantages: Optional[torch.Tensor] = None,
     ):
         if returns is None:
-            returns = self.calculate_returns(
-                rewards, self.gamma, normalize=False
-            )
+            returns = self.calculate_returns(rewards, self.gamma, normalize=False)
         if advantages is None:
             advantages = self.calculate_advantages(
                 returns, values, self.gamma, normalize=False
             )
 
-        old_log_probs = log_probs
         out = self.policy(observations)
         dist = out["dist"]
         log_probs = self.policy.log_prob(dist, actions)
@@ -187,7 +184,7 @@ class PPOOptimizer(RLOptimizer):
         rewards: torch.Tensor,
         values: torch.Tensor,
         returns: Optional[torch.Tensor] = None,
-        advantages: Optional[torch.Tensor]  = None,
+        advantages: Optional[torch.Tensor] = None,
     ) -> Any:
         losses = []
         actor_losses = []
