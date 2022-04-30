@@ -4,7 +4,8 @@ import torch
 import torch.distributions as td
 import torch.nn as nn
 
-from ezrl.algorithms.dreamer.components import RSSM, GammaPredictor, RewardPredictor
+from ezrl.algorithms.dreamer.components import RSSM, DiscountPredictor, RewardPredictor
+from ezrl.algorithms.dreamer.utils import Distribution
 
 
 class WorldModel(nn.Module):
@@ -14,10 +15,13 @@ class WorldModel(nn.Module):
         obs_encoder: nn.Module,
         obs_decoder: nn.Module,
         reward_predictor: RewardPredictor,
-        gamma_predictor: GammaPredictor,
+        discount_predictor: DiscountPredictor,
     ):
         super().__init__()
         self.rssm = rssm
+        self.posterior_model = rssm.posterior_model
+        self.prior_model = rssm.prior_model
+
         self.action_dim = rssm.action_dim
         self.latent_dim = rssm.latent_dim
         self.hidden_dim = rssm.hidden_dim
@@ -32,7 +36,7 @@ class WorldModel(nn.Module):
         self.reward_predictor = reward_predictor
 
         # gammahat_t ~ p(rhat_t | h_t, z_t)
-        self.gamma_predictor = gamma_predictor
+        self.discount_predictor = discount_predictor
 
     def recurrent(
         self,
@@ -55,7 +59,7 @@ class WorldModel(nn.Module):
 
     def posterior(
         self, hidden_state: torch.Tensor, obs_encoding: torch.Tensor
-    ) -> Tuple[torch.Tensor, td.Distribution]:
+    ) -> Distribution:
         """
         z_t ~ q(z_t | h_t, x_t)
 
@@ -64,7 +68,7 @@ class WorldModel(nn.Module):
             hidden_state (torch.Tensor): _description_
 
         Returns:
-            Tuple[torch.Tensor, td.Distribution]: _description_
+            Distribution
         """
         return self.rssm.posterior(obs_encoding, hidden_state)
 
@@ -86,7 +90,7 @@ class WorldModel(nn.Module):
 
     def decode_obs(
         self, hidden_state: torch.Tensor, latent_state: torch.Tensor
-    ) -> Tuple[torch.Tensor, td.Distribution]:
+    ) -> Distribution:
         """
         xhat_t ~ p(xhat_t | h_t, z_t)
 
@@ -101,7 +105,7 @@ class WorldModel(nn.Module):
 
     def predict_reward(
         self, hidden_state: torch.Tensor, latent_state: torch.Tensor
-    ) -> Tuple[torch.Tensor, td.Distribution]:
+    ) -> Distribution:
         """
         rhat_t ~ p(rhat_t | h_t, z_t)
 
@@ -114,9 +118,9 @@ class WorldModel(nn.Module):
         """
         return self.reward_predictor(hidden_state, latent_state)
 
-    def predict_gamma(
+    def predict_discount(
         self, hidden_state: torch.Tensor, latent_state: torch.Tensor
-    ) -> Tuple[torch.Tensor, td.Distribution]:
+    ) -> Distribution:
         """
         gammahat_t ~ p(rhat_t | h_t, z_t)
 
@@ -127,4 +131,4 @@ class WorldModel(nn.Module):
         Returns:
             Tuple[torch.Tensor, td.Distribution]: _description_
         """
-        return self.gamma_predictor(latent_state, hidden_state)
+        return self.discount_predictor(latent_state, hidden_state)

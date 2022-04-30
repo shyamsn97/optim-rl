@@ -1,5 +1,5 @@
 import abc
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.distributions as td
@@ -81,28 +81,40 @@ def get_deconvs(
     return torch.nn.Sequential(*deconvs)
 
 
-class DistributionModel(nn.Module, metaclass=abc.ABCMeta):
-    def __init__(self):
+class Distribution(nn.Module, metaclass=abc.ABCMeta):
+    def __init__(self, logits: torch.Tensor):
         super().__init__()
+        self.logits = logits
 
     @abc.abstractmethod
-    def forward(self, logits: torch.Tensor):
-        """
-        Sample from a distribution
-        """
+    def dist(self, logit_dim: int = -1) -> td.Distribution:
+        pass
+
+    def sample(self, logit_dim: int = -1) -> torch.Tensor:
+        dist = self.dist(logit_dim)
+        return dist.sample()
+
+    def forward(
+        self, logit_dim: int = -1
+    ) -> Tuple[torch.Tensor, torch.Tensor, td.Distribution]:
+        sample, dist = self.sample(logit_dim)
+        return self.logits, sample, dist
 
 
-class NormalDistributionModel(DistributionModel):
-    def __init__(self, logit_net: nn.Module):
-        super().__init__()
-        self.logit_net = logit_net
+class NormalDistribution(Distribution):
+    def __init__(self, logits: torch.Tensor):
+        super().__init__(logits)
+        self.logits = logits
 
-    def forward(self, *args, **kwargs) -> Tuple[torch.Tensor, td.Distribution]:
-        logits = self.logit_net(*args, **kwargs)
-        mean, std = torch.chunk(logits, 2, dim=-1)
+    def dist(
+        self, logit_dim: int = -1, logits: Optional[torch.Tensor] = None
+    ) -> td.Distribution:
+        if logits is None:
+            logits = self.logits
+        mean, std = torch.chunk(logits, 2, dim=logit_dim)
         std = F.softplus(std) + 0.1
         dist = td.Normal(mean, std)
-        return dist.rsample(), dist
+        return dist
 
 
 class BackendModule(nn.Module, metaclass=abc.ABCMeta):

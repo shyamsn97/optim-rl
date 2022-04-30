@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Tuple, Type
 
 import torch
 import torch.distributions as td
@@ -6,9 +6,9 @@ import torch.nn as nn
 
 from ezrl.algorithms.dreamer.utils import (
     BackendModule,
-    DistributionModel,
+    Distribution,
     LinearBackendModule,
-    NormalDistributionModel,
+    NormalDistribution,
 )
 
 
@@ -65,29 +65,27 @@ class RepresentationModel(nn.Module):
         hidden_dim: int,
         latent_dim: int,
         obs_encoding_dim: int,
-        backend_module: BackendModule = LinearBackendModule,
-        distribution_model: DistributionModel = NormalDistributionModel,
+        backend_module: Type[BackendModule] = LinearBackendModule,
+        distribution: Type[Distribution] = NormalDistribution,
     ):
         super().__init__()
         self.obs_encoding_dim = obs_encoding_dim
         self.hidden_dim = hidden_dim
         self.latent_dim = latent_dim
         self.backend_module = backend_module
-        self.distribution_model = distribution_model
-        self.net = distribution_model(
-            nn.Sequential(
-                backend_module(obs_encoding_dim + hidden_dim, 32),
-                nn.Tanh(),
-                nn.Linear(32, self.latent_dim * 2),
-            )
+        self.distribution = distribution
+        self.net = nn.Sequential(
+            backend_module(obs_encoding_dim + hidden_dim, 32),
+            nn.Tanh(),
+            nn.Linear(32, self.latent_dim * 2),
         )
 
     def forward(
         self, hidden_state: torch.Tensor, obs_encoding: torch.Tensor
-    ) -> Tuple[torch.Tensor, td.Distribution]:
+    ) -> Distribution:
         inp = torch.cat([hidden_state, obs_encoding], dim=-1)
         out = self.net(inp)
-        return out
+        return self.distribution(out)
 
 
 class TransitionPredictor(nn.Module):
@@ -107,26 +105,22 @@ class TransitionPredictor(nn.Module):
         self,
         hidden_dim: int,
         latent_dim: int,
-        backend_module: BackendModule = LinearBackendModule,
-        distribution_model: DistributionModel = NormalDistributionModel,
+        backend_module: Type[BackendModule] = LinearBackendModule,
+        distribution: Type[Distribution] = NormalDistribution,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.latent_dim = latent_dim
         self.backend_module = backend_module
-        self.distribution_model = distribution_model
-        self.net = distribution_model(
-            nn.Sequential(
-                backend_module(self.hidden_dim, 32),
-                nn.Tanh(),
-                nn.Linear(32, self.latent_dim * 2),
-            )
+        self.distribution = distribution
+        self.net = nn.Sequential(
+            backend_module(self.hidden_dim, 32),
+            nn.Tanh(),
+            nn.Linear(32, self.latent_dim * 2),
         )
 
-    def forward(
-        self, hidden_state: torch.Tensor
-    ) -> Tuple[torch.Tensor, td.Distribution]:
-        return self.net(hidden_state)
+    def forward(self, hidden_state: torch.Tensor) -> Distribution:
+        return self.distribution(self.net(hidden_state))
 
 
 class RSSM(nn.Module):
@@ -148,8 +142,11 @@ class RSSM(nn.Module):
 
         # posterior, z_t ~ q(z_t | h_t, x_t)
         self.representation_model: RepresentationModel = representation_model
+        self.posterior_model: RepresentationModel = representation_model
+
         # prior, zhat_t ~ p(zhat_t | h_t)
         self.transition_predictor: TransitionPredictor = transition_predictor
+        self.prior_model: TransitionPredictor = transition_predictor
 
     def initialize_hidden_state(self, batch_size: int = 1) -> torch.Tensor:
         return self.recurrent_model.initialize_state(batch_size)
@@ -171,33 +168,6 @@ class RSSM(nn.Module):
         return self.recurrent_model(prev_hidden_state, prev_latent_state, prev_action)
 
 
-class ObsDecoder(nn.Module):
-    """
-    Observation Decoder
-
-    Defined as:
-        xhat_t ~ p(xhat_t | h_t, z_t)
-
-        xhat_t: posterior latent state at timestep t
-
-        p: prior distribution to decode obs from latent state
-        h_t: current hidden state
-        z_t: current latent state
-    """
-
-    def __init__(self, obs_decoder_model: nn.Module, hidden_dim: int, latent_dim: int):
-        super().__init__()
-        self.hidden_dim = hidden_dim
-        self.latent_dim = latent_dim
-        self.net = NormalDistributionModel(obs_decoder_model)
-
-    def forward(
-        self, hidden_state: torch.Tensor, latent_state: torch.Tensor
-    ) -> Tuple[torch.Tensor, td.Distribution]:
-        inp = torch.cat([hidden_state, latent_state], dim=-1)
-        return self.net(inp)
-
-
 class RewardPredictor(nn.Module):
     """
     Observation Decoder
@@ -216,28 +186,26 @@ class RewardPredictor(nn.Module):
         self,
         hidden_dim: int,
         latent_dim: int,
-        backend_module: BackendModule = LinearBackendModule,
-        distribution_model: DistributionModel = NormalDistributionModel,
+        backend_module: Type[BackendModule] = LinearBackendModule,
+        distribution: Type[Distribution] = NormalDistribution,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.latent_dim = latent_dim
         self.backend_module = backend_module
-        self.distribution_model = distribution_model
-        self.net = distribution_model(
-            nn.Sequential(
-                backend_module(latent_dim + hidden_dim, 32), nn.Tanh(), nn.Linear(32, 2)
-            )
+        self.distribution = distribution
+        self.net = nn.Sequential(
+            backend_module(latent_dim + hidden_dim, 32), nn.Tanh(), nn.Linear(32, 2)
         )
 
     def forward(
         self, hidden_state: torch.Tensor, latent_state: torch.Tensor
-    ) -> Tuple[torch.Tensor, td.Distribution]:
+    ) -> Distribution:
         inp = torch.cat([hidden_state, latent_state], dim=-1)
-        return self.net(inp)
+        return self.distribution(self.net(inp))
 
 
-class GammaPredictor(nn.Module):
+class DiscountPredictor(nn.Module):
     """
     Observation Decoder
 
@@ -255,22 +223,20 @@ class GammaPredictor(nn.Module):
         self,
         hidden_dim: int,
         latent_dim: int,
-        backend_module: BackendModule = LinearBackendModule,
-        distribution_model: DistributionModel = NormalDistributionModel,
+        backend_module: Type[BackendModule] = LinearBackendModule,
+        distribution: Type[Distribution] = NormalDistribution,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.latent_dim = latent_dim
         self.backend_module = backend_module
-        self.distribution_model = distribution_model
-        self.net = distribution_model(
-            nn.Sequential(
-                backend_module(latent_dim + hidden_dim, 32), nn.Tanh(), nn.Linear(32, 2)
-            )
+        self.distribution = distribution
+        self.net = nn.Sequential(
+            backend_module(latent_dim + hidden_dim, 32), nn.Tanh(), nn.Linear(32, 2)
         )
 
     def forward(
         self, hidden_state: torch.Tensor, latent_state: torch.Tensor
-    ) -> Tuple[torch.Tensor, td.Distribution]:
+    ) -> Distribution:
         inp = torch.cat([hidden_state, latent_state], dim=-1)
-        return self.net(inp)
+        return self.distribution(self.net(inp))
