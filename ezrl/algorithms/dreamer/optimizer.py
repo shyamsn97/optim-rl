@@ -63,7 +63,7 @@ class DreamerOptimizer(RLOptimizer):
 
         # image loss
         # - lnp(x_t | h_t, z_t)
-        image_dist = td.Independent(decoded_observations.dist(logit_dim=2), 1)
+        image_dist = td.Independent(decoded_observations.dist(logit_dim=2), 3   )
         image_loss = -torch.mean(image_dist.log_prob(observations))
 
         # reward loss

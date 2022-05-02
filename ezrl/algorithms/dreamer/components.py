@@ -4,11 +4,11 @@ import torch
 import torch.distributions as td
 import torch.nn as nn
 
-from ezrl.algorithms.dreamer.utils import (
+from ezrl.algorithms.dreamer.utils import (  # NormalDistribution,
     BackendModule,
     Distribution,
     LinearBackendModule,
-    NormalDistribution,
+    NormalDistributionWithoutSTD,
 )
 
 
@@ -66,7 +66,7 @@ class RepresentationModel(nn.Module):
         latent_dim: int,
         obs_encoding_dim: int,
         backend_module: Type[BackendModule] = LinearBackendModule,
-        distribution: Type[Distribution] = NormalDistribution,
+        distribution: Type[Distribution] = NormalDistributionWithoutSTD,
     ):
         super().__init__()
         self.obs_encoding_dim = obs_encoding_dim
@@ -77,7 +77,7 @@ class RepresentationModel(nn.Module):
         self.net = nn.Sequential(
             backend_module(obs_encoding_dim + hidden_dim, 32),
             nn.Tanh(),
-            nn.Linear(32, self.latent_dim * 2),
+            nn.Linear(32, self.latent_dim),
         )
 
     def forward(
@@ -106,7 +106,7 @@ class TransitionPredictor(nn.Module):
         hidden_dim: int,
         latent_dim: int,
         backend_module: Type[BackendModule] = LinearBackendModule,
-        distribution: Type[Distribution] = NormalDistribution,
+        distribution: Type[Distribution] = NormalDistributionWithoutSTD,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -116,7 +116,7 @@ class TransitionPredictor(nn.Module):
         self.net = nn.Sequential(
             backend_module(self.hidden_dim, 32),
             nn.Tanh(),
-            nn.Linear(32, self.latent_dim * 2),
+            nn.Linear(32, self.latent_dim),
         )
 
     def forward(self, hidden_state: torch.Tensor) -> Distribution:
@@ -187,7 +187,7 @@ class RewardPredictor(nn.Module):
         hidden_dim: int,
         latent_dim: int,
         backend_module: Type[BackendModule] = LinearBackendModule,
-        distribution: Type[Distribution] = NormalDistribution,
+        distribution: Type[Distribution] = NormalDistributionWithoutSTD,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -195,7 +195,7 @@ class RewardPredictor(nn.Module):
         self.backend_module = backend_module
         self.distribution = distribution
         self.net = nn.Sequential(
-            backend_module(latent_dim + hidden_dim, 32), nn.Tanh(), nn.Linear(32, 2)
+            backend_module(latent_dim + hidden_dim, 32), nn.Tanh(), nn.Linear(32, 1)
         )
 
     def forward(
@@ -224,7 +224,7 @@ class DiscountPredictor(nn.Module):
         hidden_dim: int,
         latent_dim: int,
         backend_module: Type[BackendModule] = LinearBackendModule,
-        distribution: Type[Distribution] = NormalDistribution,
+        distribution: Type[Distribution] = NormalDistributionWithoutSTD,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -232,7 +232,7 @@ class DiscountPredictor(nn.Module):
         self.backend_module = backend_module
         self.distribution = distribution
         self.net = nn.Sequential(
-            backend_module(latent_dim + hidden_dim, 32), nn.Tanh(), nn.Linear(32, 2)
+            backend_module(latent_dim + hidden_dim, 32), nn.Tanh(), nn.Linear(32, 1)
         )
 
     def forward(

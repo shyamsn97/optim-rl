@@ -117,6 +117,21 @@ class NormalDistribution(Distribution):
         return dist
 
 
+class NormalDistributionWithoutSTD(Distribution):
+    def __init__(self, logits: torch.Tensor, std: float = 1.0):
+        super().__init__(logits)
+        self.logits = logits
+        self.std = std
+
+    def dist(
+        self, logit_dim: int = -1, logits: Optional[torch.Tensor] = None
+    ) -> td.Distribution:
+        if logits is None:
+            logits = self.logits
+        dist = td.Normal(logits, self.std)
+        return dist
+
+
 class BackendModule(nn.Module, metaclass=abc.ABCMeta):
     def __init__(self):
         super().__init__()
