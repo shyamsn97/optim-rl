@@ -31,7 +31,7 @@ def get_convs(
                     in_channels, channel_dimension, 3, 2, padding=1, bias=bias
                 )
             )
-            convs.append(torch.nn.ELU())
+            convs.append(torch.nn.ReLU())
             in_channels = channel_dimension
         size = size // 2
     return torch.nn.Sequential(*convs)
@@ -75,7 +75,7 @@ def get_deconvs(
                     bias=bias,
                 )
             )
-            deconvs.append(torch.nn.ELU())
+            deconvs.append(torch.nn.ReLU())
             in_channels = channel_dimension
         size = size * 2
     return torch.nn.Sequential(*deconvs)
@@ -107,12 +107,16 @@ class NormalDistribution(Distribution):
         self.logits = logits
 
     def dist(
-        self, logit_dim: int = -1, logits: Optional[torch.Tensor] = None
+        self, logit_dim: int = -1, logits: Optional[torch.Tensor] = None, std=None
     ) -> td.Distribution:
         if logits is None:
             logits = self.logits
-        mean, std = torch.chunk(logits, 2, dim=logit_dim)
-        std = F.softplus(std) + 0.1
+        if std is None:
+            mean, std = torch.chunk(logits, 2, dim=logit_dim)
+            std = F.softplus(std) + 0.1
+        else:
+            mean = logits
+            std = 1.0
         dist = td.Normal(mean, std)
         return dist
 

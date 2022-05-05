@@ -66,7 +66,7 @@ class RepresentationModel(nn.Module):
         latent_dim: int,
         obs_encoding_dim: int,
         backend_module: Type[BackendModule] = LinearBackendModule,
-        distribution: Type[Distribution] = NormalDistribution,
+        distribution: Type[Distribution] = NormalDistribution
     ):
         super().__init__()
         self.obs_encoding_dim = obs_encoding_dim
