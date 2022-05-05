@@ -97,22 +97,22 @@ class PPOOptimizer(RLOptimizer):
 
     def calculate_advantages(
         self,
-        returns: np.array,
-        values: np.array,
+        returns: torch.Tensor,
+        values: torch.Tensor,
         discount_factor: float,
-        normalize: bool = True,
+        normalize: bool = False,
     ):
 
         adv = returns - values
 
-        adv = np.squeeze(np.array(adv))
+        adv = adv.squeeze()
 
         if normalize:
-            adv = (adv - np.mean(adv)) / np.std(adv)
+            adv = (adv - adv.squeeze()) / adv.std()
         return adv
 
     def calculate_returns(
-        self, rewards: np.array, discount_factor: float, normalize: bool = True
+        self, rewards: torch.Tensor, discount_factor: float, normalize: bool = False
     ):
 
         returns = []
@@ -122,10 +122,10 @@ class PPOOptimizer(RLOptimizer):
             R = r + R * discount_factor
             returns.insert(0, R)
 
-        returns = np.squeeze(np.array(returns))
+        returns = torch.tensor(returns).squeeze().to(rewards.device)
 
         if normalize:
-            returns = (returns - np.mean(returns)) / np.std(returns)
+            returns = (returns - returns.mean()) / returns.std()
         return returns
 
     def value_loss(self, values, returns):
@@ -155,6 +155,8 @@ class PPOOptimizer(RLOptimizer):
         values: torch.Tensor,
         returns: Optional[torch.Tensor] = None,
         advantages: Optional[torch.Tensor] = None,
+        *args,
+        **kwargs
     ):
         if returns is None:
             returns = self.calculate_returns(rewards, self.gamma, normalize=False)
@@ -163,11 +165,11 @@ class PPOOptimizer(RLOptimizer):
                 returns, values, self.gamma, normalize=False
             )
 
-        out = self.policy(observations)
+        out = self.policy(observations, *args, **kwargs)
         dist = out["dist"]
         log_probs = self.policy.log_prob(dist, actions)
         actor_loss = self.actor_loss(log_probs, old_log_probs, advantages)
-        values = out["value"]
+        values = self.policy.critic(observations)
         value_loss = self.value_loss(values, returns)
         loss = actor_loss + self.vf_coef * value_loss
 
@@ -185,6 +187,8 @@ class PPOOptimizer(RLOptimizer):
         values: torch.Tensor,
         returns: Optional[torch.Tensor] = None,
         advantages: Optional[torch.Tensor] = None,
+        *args,
+        **kwargs
     ) -> Any:
         losses = []
         actor_losses = []
@@ -192,7 +196,15 @@ class PPOOptimizer(RLOptimizer):
         for _ in range(self.train_pi_iters):
             self.zero_grad()
             loss, actor_loss, value_loss = self.loss_fn(
-                observations, actions, log_probs, rewards, values, returns, advantages
+                observations,
+                actions,
+                log_probs,
+                rewards,
+                values,
+                returns,
+                advantages,
+                *args,
+                **kwargs
             )
             loss.backward()
             self.step()
@@ -219,7 +231,7 @@ class PPOOptimizer(RLOptimizer):
         else:
             rollouts = list(
                 pool.starmap(
-                    [tuple(self.policy, *args, **kwargs) for _ in range(num_rollouts)]
+                    rollout_fn, [tuple(self.policy, *args, **kwargs) for _ in range(num_rollouts)]
                 )
             )
         return rollouts
