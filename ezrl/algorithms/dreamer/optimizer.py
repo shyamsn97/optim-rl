@@ -1,5 +1,6 @@
 import torch
 import torch.distributions as td
+import torch.nn.functional as F  # noqa
 import torch.optim as optim
 from torch.distributions.kl import kl_divergence
 
@@ -63,8 +64,17 @@ class DreamerOptimizer(RLOptimizer):
 
         # image loss
         # - lnp(x_t | h_t, z_t)
-        image_dist = td.Independent(decoded_observations.dist(logit_dim=2), 3)
-        image_loss = -torch.mean(image_dist.log_prob(observations))
+        image_dist = td.Normal(
+            decoded_observations.logits.view(observations.size(1), -1), 1.0
+        )
+        # image_dist = td.Independent(decoded_observations.dist(logit_dim=2), 3)
+        image_loss = -torch.mean(
+            image_dist.log_prob(observations.view(observations.size(1), -1))
+        )
+        # image_loss = F.mse_loss(
+        #     decoded_observations.logits.view(observations.size(1), -1),
+        #     observations.view(observations.size(1), -1),
+        # )
 
         # reward loss
         reward_dist = td.Independent(predicted_rewards.dist(), 1)
@@ -88,11 +98,11 @@ class DreamerOptimizer(RLOptimizer):
         ) * torch.mean(kl_posterior)
 
         return (
-            image_loss + reward_loss + self.kl_beta * kl_loss,
+            image_loss,
             image_loss,
             reward_loss,
             kl_loss,
-            image_dist,
+            decoded_observations,
         )
 
     def zero_grad(self) -> None:

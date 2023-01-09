@@ -4,6 +4,7 @@ import gym
 import numpy as np
 import scipy.signal
 import torch
+import torch.distributions as td
 import torch.nn.functional as F
 import torch.optim as optim
 
@@ -152,9 +153,11 @@ class PPOOptimizer(RLOptimizer):
         actions: torch.Tensor,
         old_log_probs: torch.Tensor,
         rewards: torch.Tensor,
-        values: torch.Tensor,
+        old_values: torch.Tensor,
         returns: Optional[torch.Tensor] = None,
         advantages: Optional[torch.Tensor] = None,
+        policy_dist: Optional[td.Distribution] = None,
+        values: Optional[torch.Tensor] = None,
         *args,
         **kwargs
     ):
@@ -162,15 +165,19 @@ class PPOOptimizer(RLOptimizer):
             returns = self.calculate_returns(rewards, self.gamma, normalize=False)
         if advantages is None:
             advantages = self.calculate_advantages(
-                returns, values, self.gamma, normalize=False
+                returns, old_values, self.gamma, normalize=False
             )
 
-        out = self.policy(observations, *args, **kwargs)
-        dist = out["dist"]
-        log_probs = self.policy.log_prob(dist, actions)
+        if policy_dist is None:
+            out = self.policy(observations, *args, **kwargs)
+            policy_dist = out["dist"]
+        log_probs = self.policy.log_prob(policy_dist, actions)
         actor_loss = self.actor_loss(log_probs, old_log_probs, advantages)
-        values = self.policy.critic(observations)
+
+        if values is None:
+            values = self.policy.critic(observations)
         value_loss = self.value_loss(values, returns)
+
         loss = actor_loss + self.vf_coef * value_loss
 
         return loss, actor_loss, value_loss
@@ -231,7 +238,8 @@ class PPOOptimizer(RLOptimizer):
         else:
             rollouts = list(
                 pool.starmap(
-                    rollout_fn, [tuple(self.policy, *args, **kwargs) for _ in range(num_rollouts)]
+                    rollout_fn,
+                    [tuple(self.policy, *args, **kwargs) for _ in range(num_rollouts)],
                 )
             )
         return rollouts
