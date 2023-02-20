@@ -19,7 +19,7 @@ class BaseReplayBuffer(metaclass=abc.ABCMeta):
 
 
 class ReplayBuffer(BaseReplayBuffer):
-    def __init__(self, buffer=None, max_size: int = 10 ** 10, episodic: bool = False):
+    def __init__(self, buffer=None, max_size: int = 10**10, episodic: bool = False):
         self.max_size = max_size
         self.episodic = episodic
         self.buffer = buffer

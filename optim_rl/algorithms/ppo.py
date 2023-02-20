@@ -2,13 +2,12 @@ from typing import Any, Dict  # noqa
 
 import gym
 import numpy as np
-import scipy.signal
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
 
-from ezrl.optimizer import RLOptimizer
-from ezrl.policy import ACPolicy
+from optim_rl.optimizer import RLOptimizer
+from optim_rl.policy import ACPolicy
 
 
 def ppo_rollout(
@@ -21,46 +20,40 @@ def ppo_rollout(
             env_creation_fn = gym.make
         env = env_creation_fn(env_name)
     done = False
-    observations, actions, rewards, log_probs, values = ([], [], [], [], [])
+    observations, actions, rewards, log_probs, values, terminals = (
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+    )
     observation = env.reset()
     with torch.no_grad():
         while not done:
-            obs = torch.from_numpy(observation).to(policy.device)
+            obs = torch.from_numpy(observation).unsqueeze(0).to(policy.device)
             action, out = policy.act(obs)
-            values = policy.critic(obs)
-            next_observation, reward, done, info = env.step(action)
+            critic_values = policy.critic(obs)
+            next_observation, reward, done, _ = env.step(action)
 
             observations.append(observation)
             actions.append(action)
             rewards.append(reward)
             log_probs.append(out["log_probs"].detach().cpu().numpy())
-            values.append(values.detach().cpu().numpy())
+            values.append(critic_values.detach().cpu().numpy())
+            terminals.append(done)
 
             observation = next_observation
     env.close()
+
     return {
         "observations": np.array(observations),
         "actions": np.array(actions),
         "rewards": np.array(rewards),
         "log_probs": np.array(log_probs),
         "values": np.array(values),
+        "terminals": np.array(terminals),
     }
-
-
-def discount_cumsum(x, discount):
-    """
-    magic from rllab for computing discounted cumulative sums of vectors.
-    input:
-        vector x,
-        [x0,
-         x1,
-         x2]
-    output:
-        [x0 + discount * x1 + discount^2 * x2,
-         x1 + discount * x2,
-         x2]
-    """
-    return scipy.signal.lfilter([1], [1, float(-discount)], x[::-1], axis=0)[::-1]
 
 
 class PPOOptimizer(RLOptimizer):
@@ -69,7 +62,7 @@ class PPOOptimizer(RLOptimizer):
         policy: ACPolicy,
         pi_lr: float = 0.0005,
         vf_coef: float = 0.5,
-        entropy_weight: float = 0.001,
+        entropy_weight: float = 0.01,
         gamma: float = 0.99,
         lam: float = 0.95,
         clip_ratio: float = 0.2,
@@ -100,18 +93,10 @@ class PPOOptimizer(RLOptimizer):
         returns: np.array,
         values: np.array,
         discount_factor: float,
-        normalize: bool = True,
+        normalize: bool = False,
     ):
 
         adv = returns - values
-
-        # adv = []
-        # R = 0
-
-        # for r in reversed(advantages):
-        #     R = r + R * discount_factor
-        #     adv.insert(0, R)
-
         adv = np.squeeze(np.array(adv))
 
         if normalize:
@@ -119,35 +104,40 @@ class PPOOptimizer(RLOptimizer):
         return adv
 
     def calculate_returns(
-        self, rewards: np.array, discount_factor: float, normalize: bool = True
+        self,
+        rewards: np.array,
+        terminals: np.array,
+        discount_factor: float,
+        normalize: bool = True,
     ):
-
         returns = []
-        R = 0
+        discounted_reward = 0
 
-        for r in reversed(rewards):
-            R = r + R * discount_factor
-            returns.insert(0, R)
+        for r, terminal in zip(reversed(rewards), reversed(terminals)):
+            if terminal == 0:
+                discounted_reward = 0.0
+            discounted_reward = r + discounted_reward * discount_factor
+            returns.insert(0, discounted_reward)
 
         returns = np.squeeze(np.array(returns))
 
         if normalize:
-            returns = (returns - np.mean(returns)) / np.std(returns)
+            returns = (returns - np.mean(returns)) / (np.std(returns) + 1e-7)
         return returns
 
     def value_loss(self, values, returns):
         assert tuple(values.squeeze().size()) == tuple(returns.squeeze().size())
-        return F.mse_loss(returns.squeeze(), values.squeeze()).mean()
+        return F.mse_loss(returns.squeeze(), values.squeeze())
 
     def actor_loss(self, log_probs, old_logprobs, advantages):
-        ratio = torch.exp(log_probs.squeeze() - old_logprobs.squeeze())
+        ratio = torch.exp(log_probs.squeeze() - old_logprobs.squeeze().detach())
         assert tuple(ratio.size()) == tuple(advantages.size())
         surr1 = ratio * advantages
         surr2 = (
             torch.clamp(ratio, 1.0 - self.clip_ratio, 1.0 + self.clip_ratio)
             * advantages
         )
-        loss_pi = -(torch.min(surr1, surr2)).mean()
+        loss_pi = -torch.min(surr1, surr2)
         return loss_pi
 
     def zero_grad(self):
@@ -165,11 +155,17 @@ class PPOOptimizer(RLOptimizer):
         out = self.policy(observations)
         dist = out["dist"]
         log_probs = self.policy.log_prob(dist, actions)
-        actor_loss = self.actor_loss(log_probs, old_log_probs, advantages)
+        actor_loss = self.actor_loss(log_probs, old_log_probs, advantages).mean()
+
         values = self.policy.critic(observations)
-        value_loss = self.value_loss(values, returns)
-        loss = actor_loss + self.vf_coef * value_loss
-        return loss, actor_loss, value_loss
+        value_loss = self.value_loss(values, returns).mean()
+
+        entropy_loss = dist.entropy().sum(1)
+
+        loss = (
+            actor_loss + self.vf_coef * value_loss - self.entropy_weight * entropy_loss
+        )
+        return loss.mean(), actor_loss, value_loss, entropy_loss
 
     def step(self):
         self.optimizer.step()
@@ -220,7 +216,7 @@ class PPOOptimizer(RLOptimizer):
             )
         for r in rollouts:
             r["returns"] = self.calculate_returns(
-                r["rewards"], self.gamma, normalize=False
+                r["rewards"], r["terminals"], self.gamma, normalize=True
             )
             r["advantages"] = self.calculate_advantages(
                 r["returns"], r["values"], self.gamma, normalize=False

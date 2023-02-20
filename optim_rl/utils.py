@@ -7,7 +7,7 @@ import gym
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from ezrl.policy import GymPolicy
+from optim_rl.policy import GymPolicy
 
 
 def render(env: gym.Env, policy: GymPolicy):

@@ -20,9 +20,9 @@ clean-test: ## remove test and coverage artifacts
 	rm -fr .pytest_cache
 
 lint: ## check style with flake8
-	isort --profile black ezrl
-	black ezrl
-	flake8 ezrl
+	isort --profile black optim_rl
+	black optim_rl
+	flake8 optim_rl
 
 install: clean lint
 	python setup.py install

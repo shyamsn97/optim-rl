@@ -13,7 +13,7 @@ with open(path.join(this_directory, 'README.md'), encoding='utf-8') as f:
 
 
 setup(
-    name="ezrl",
+    name="optim-rl",
     version="0.1.0",
     url="https://github.com/shyamsn97/ez-rl",
     license='MIT',
@@ -21,7 +21,7 @@ setup(
     author="Shyam Sudhakaran",
     author_email="shyamsnair@protonmail.com",
 
-    description="Easy, flexible, and modular RL components",
+    description="Easy, flexible, and modular RL components designed as torch optimizers.",
 
     long_description=long_description,
     long_description_content_type="text/markdown",
@@ -29,6 +29,11 @@ setup(
     packages=find_packages(exclude=('tests',)),
 
     install_requires=[
+        'torch',
+        'gym',
+        'scipy',
+        'einops',
+        'tqdm'
     ],
 
     classifiers=[

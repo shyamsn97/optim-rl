@@ -10,8 +10,8 @@ from einops import repeat
 from torch.distributions.normal import Normal
 from torch.nn.utils import parameters_to_vector, vector_to_parameters
 
-from ezrl.optimizer import Loss, RLOptimizer
-from ezrl.policy import GymPolicy
+from optim_rl.optimizer import Loss, RLOptimizer
+from optim_rl.policy import GymPolicy
 
 
 def es_rollout(policy: GymPolicy, env_name: str = None, env=None, env_creation_fn=None):
