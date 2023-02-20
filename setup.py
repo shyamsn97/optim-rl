@@ -15,7 +15,7 @@ with open(path.join(this_directory, 'README.md'), encoding='utf-8') as f:
 setup(
     name="optim-rl",
     version="0.1.0",
-    url="https://github.com/shyamsn97/ez-rl",
+    url="https://github.com/shyamsn97/optim-rl",
     license='MIT',
 
     author="Shyam Sudhakaran",
