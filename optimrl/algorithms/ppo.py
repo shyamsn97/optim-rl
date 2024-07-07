@@ -6,8 +6,8 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 
-from optim_rl.optimizer import RLOptimizer
-from optim_rl.policy import ACPolicy
+from optimrl.optimizer import RLOptimizer
+from optimrl.policy import ACPolicy
 
 
 def ppo_rollout(

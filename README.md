@@ -7,8 +7,8 @@
 ### Example:
 
 ```python
-from optim_rl.policy import GymPolicy
-from optim_rl.algorithms.reinforce import ReinforceOptimizer
+from optimrl.policy import GymPolicy
+from optimrl.algorithms.reinforce import ReinforceOptimizer
 
 class CartPolePolicy(GymPolicy):
     def __init__(self):

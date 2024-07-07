@@ -3,8 +3,8 @@ import numpy as np
 import torch
 import torch.optim as optim
 
-from optim_rl.optimizer import RLOptimizer
-from optim_rl.policy import GymPolicy
+from optimrl.optimizer import RLOptimizer
+from optimrl.policy import GymPolicy
 
 
 def reinforce_rollout(
