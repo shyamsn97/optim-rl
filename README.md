@@ -1,8 +1,6 @@
 # optim-rl -- RL algorithms implemented as optimizers
 
-**Note: This library is experimental and currently under development**
-
-`optim-rl` is an RL framework where algorithms are implemented and interacted with like torch optimizers
+`optim-rl` is an RL framework where algorithms are implemented as simple and structured optimizers
 
 ### Example:
 

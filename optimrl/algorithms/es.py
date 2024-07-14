@@ -151,9 +151,6 @@ class ESOptimizer(RLOptimizer):
         return params, epsilon, mean
 
     def rollout(self, rollout_fn=None, pool=None, *args, **kwargs):
-        """
-        Optional default rollout_fn for the algorithm.
-        """
         if rollout_fn is None:
             rollout_fn = es_rollout
         perturbed_params, epsilon, mean = self.get_perturbed_params()

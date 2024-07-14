@@ -4,102 +4,21 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-
-def convert_to_torch(rollout, device):
-    steps = rollout.steps
-    num_envs = rollout.num_envs
-    num_steps = len(rollout)
-    # num_envs x ...
-    obs_shape = steps[0].observation.shape[1:]
-
-    if len(steps[0].action.shape) <= 1:
-        action_shape = ()
-    else:
-        action_shape = steps[0].action.shape[1:]
-
-    obs = torch.zeros((num_steps, num_envs) + obs_shape).to(device)
-    actions = torch.zeros((num_steps, num_envs) + action_shape).to(device)
-    rewards = torch.zeros((num_steps, num_envs)).to(device)
-    dones = torch.zeros((num_steps, num_envs)).to(device)
-
-    infos = []
-    policy_outs = {}
-
-    for i, step in enumerate(steps):
-        obs[i, :] = torch.from_numpy(step.observation).to(device)
-        actions[i] = torch.Tensor(step.action).to(device)
-        rewards[i] = torch.from_numpy(step.reward).to(device)
-        dones[i] = torch.from_numpy(step.done).to(device)
-        infos.append(step.info)
-
-        for k in step.policy_output:
-            if k not in policy_outs:
-                policy_outs[k] = []
-            policy_outs[k].append(step.policy_output[k])
-
-    for k in policy_outs:
-        if isinstance(policy_outs[k], torch.Tensor):
-            policy_outs[k] = torch.stack(policy_outs[k]).to(device)
-
-    last_obs = torch.Tensor(rollout.last_obs).to(device)
-    last_done = torch.Tensor(rollout.last_done).to(device)
-
-    return {
-        "obs": obs,
-        "actions": actions,
-        "rewards": rewards,
-        "dones": dones,
-        "infos": infos,
-        "policy_outs": policy_outs,
-        "last_obs": last_obs,
-        "last_done": last_done,
-    }
+from optimrl.optimizer import LossFunction, RLOptimizer
 
 
-def get_returns_advantages(
-    rewards: torch.Tensor,
-    values: torch.Tensor,
-    dones: torch.Tensor,
-    last_value: torch.Tensor,
-    last_done: torch.Tensor,
-    gamma: float = 0.99,
-    gae_lambda: float = 0.95,
-):
-    with torch.no_grad():
-        num_steps = rewards.shape[0]
-        device = rewards.device
-        last_value = last_value.view(1, -1)
-        advantages = torch.zeros_like(rewards).to(device)
-        lastgaelam = 0
-        for t in reversed(range(num_steps)):
-            if t == num_steps - 1:
-                nextnonterminal = 1.0 - last_done
-                nextvalues = last_value
-            else:
-                nextnonterminal = 1.0 - dones[t + 1]
-                nextvalues = values[t + 1]
-            delta = rewards[t] + gamma * nextvalues * nextnonterminal - values[t]
-            advantages[t] = lastgaelam = (
-                delta + gamma * gae_lambda * nextnonterminal * lastgaelam
-            )
-        returns = advantages + values
-        return returns, advantages
-
-
-class PPOLossFunction:
+class PPOLossFunction(LossFunction):
     def __init__(
         self,
         vf_coef: float = 0.5,
         ent_coef: float = 0.001,
         clip_ratio: float = 0.2,
         clip_vloss: bool = True,
-        norm_advantages: bool = True,
     ):
         self.vf_coef = vf_coef
         self.ent_coef = ent_coef
         self.clip_ratio = clip_ratio
         self.clip_vloss = clip_vloss
-        self.norm_advantages = norm_advantages
 
     def __call__(
         self,
@@ -111,9 +30,6 @@ class PPOLossFunction:
         old_values: Optional[torch.Tensor] = None,
         entropy: Optional[torch.Tensor] = None,
     ):
-        if self.norm_advantages:
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
         logratio = log_probs - old_log_probs
         ratio = logratio.exp()
 
@@ -138,7 +54,10 @@ class PPOLossFunction:
         else:
             v_loss = 0.5 * ((values - returns) ** 2).mean()
 
-        entropy_loss = entropy.mean()
+        if entropy is not None:
+            entropy_loss = entropy.mean()
+        else:
+            entropy = 0.0
         loss = pg_loss - self.ent_coef * entropy_loss + self.vf_coef * v_loss
         return loss, {
             "pg_loss": pg_loss.item(),
@@ -146,27 +65,63 @@ class PPOLossFunction:
             "v_loss": v_loss.item(),
         }
 
+    def get_returns_advantages(
+        self,
+        rewards: torch.Tensor,
+        values: torch.Tensor,
+        dones: torch.Tensor,
+        gamma: float = 0.99,
+        normalize_returns: bool = False,
+        normalize_advantages: bool = True,
+    ):
+        with torch.no_grad():
+            returns = torch.zeros_like(rewards)
+            num_steps = returns.shape[0]
 
-class PPOOptimizer:
+            for t in reversed(range(num_steps)):
+                if t == num_steps - 1:
+                    R = torch.zeros_like(rewards[t])
+                else:
+                    R = returns[t + 1]
+                returns[t] = rewards[t] + (1.0 - dones[t]) * R * gamma
+
+            if normalize_returns:
+                # normalize over num_steps
+                returns = (returns - returns.mean(dim=0, keepdim=True)) / returns.std(
+                    dim=0, keepdim=True
+                )
+
+            advantages = returns - values.detach()
+            if normalize_advantages:
+                advantages = (
+                    advantages - advantages.mean(dim=0, keepdim=True)
+                ) / advantages.std(dim=0, keepdim=True)
+            return returns, advantages
+
+
+class PPOOptimizer(RLOptimizer):
     def __init__(
         self,
         policy,
         loss_fn,
         num_minibatches: int = 4,
-        pi_lr: float = 2.5e-4,
+        pi_lr: float = 0.0002,
         n_updates: int = 4,
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
         max_grad_norm: float = 0.5,
+        norm_returns: bool = False,
+        norm_advantages: bool = True,
     ):
-        self.policy = policy
-        self.loss_fn = loss_fn
+        super().__init__(policy, loss_fn)
         self.num_minibatches = num_minibatches
         self.pi_lr = pi_lr
         self.n_updates = n_updates
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.max_grad_norm = max_grad_norm
+        self.norm_returns = norm_returns
+        self.norm_advantages = norm_advantages
 
         # setup optimizer
         self.optimizer = torch.optim.Adam(
@@ -176,47 +131,39 @@ class PPOOptimizer:
     def step(
         self,
         rollouts,
-        device,
     ):
-        num_envs = rollouts.num_envs
-        num_steps = len(rollouts)
+        num_steps = rollouts["obs"].shape[0]
+        num_envs = rollouts["obs"].shape[1]
         batch_size = num_envs * num_steps
         minibatch_size = int(batch_size // self.num_minibatches)
 
-        rollouts = convert_to_torch(rollouts, device)
-        rewards = rollouts["rewards"].view(num_steps, num_envs)
+        rewards = rollouts["rewards"].view(num_steps, num_envs).detach()
         np_rewards = rewards.detach().cpu().numpy()
 
-        dones = rollouts["dones"]
+        dones = rollouts["dones"].view(num_steps, num_envs).detach()
         old_values = (
             torch.stack(rollouts["policy_outs"]["values"])
             .detach()
             .view(num_steps, num_envs)
         )
-
         old_log_probs = torch.stack(rollouts["policy_outs"]["log_probs"]).detach()
-        observations = rollouts["obs"]
-        actions = rollouts["actions"]
+        observations = rollouts["obs"].detach()
+        actions = rollouts["actions"].detach()
 
         with torch.no_grad():
-            last_value = self.policy(rollouts["last_obs"])["values"]
-            last_done = rollouts["last_done"]
-            returns, advantages = get_returns_advantages(
+            returns, advantages = self.loss_fn.get_returns_advantages(
                 rewards=rewards,
                 values=old_values,
                 dones=dones,
-                last_value=last_value,
-                last_done=last_done,
                 gamma=self.gamma,
-                gae_lambda=self.gae_lambda,
+                normalize_returns=self.norm_returns,
+                normalize_advantages=self.norm_advantages,
             )
             # flatten stuff
 
         rewards = rewards.view(-1)
         dones = dones.view(-1)
         old_values = old_values.view(-1)
-        last_value = last_value.view(-1)
-        last_done = last_done.view(-1)
 
         observations = torch.flatten(observations, 0, 1)
         old_log_probs = torch.flatten(old_log_probs, 0, 1)
@@ -229,14 +176,6 @@ class PPOOptimizer:
             batch_size,
         )
 
-        #         print("observations", observations.shape)
-        #         print("old_log_probs", old_log_probs.shape)
-        #         print("actions", actions.shape)
-        #         print("returns", returns.shape)
-        #         print("advantages", advantages.shape)
-        #         print("rewards", rewards.shape)
-        #         print("dones", dones.shape)
-
         b_inds = np.arange(batch_size)
         for _ in range(self.n_updates):
             np.random.shuffle(b_inds)
@@ -246,7 +185,7 @@ class PPOOptimizer:
 
                 self.optimizer.zero_grad()
                 out = self.policy(observations[mb_inds], actions[mb_inds])
-                log_probs = out["log_probs"].view(minibatch_size, -1)
+                log_probs = out["log_probs"].view(minibatch_size, -1).squeeze(dim=-1)
                 entropy = out["entropy"].view(
                     minibatch_size,
                 )
