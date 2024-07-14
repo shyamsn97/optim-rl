@@ -1,224 +1,268 @@
-from typing import Any, Dict  # noqa
+from typing import Optional
 
-import gym
 import numpy as np
 import torch
-import torch.nn.functional as F
-import torch.optim as optim
-
-from optimrl.optimizer import RLOptimizer
-from optimrl.policy import ACPolicy
+import torch.nn as nn
 
 
-def ppo_rollout(
-    policy: ACPolicy, env_name: str = None, env=None, env_creation_fn=None
-) -> Dict[str, np.array]:
-    if env_name is None and env is None:
-        raise ValueError("env_name or env must be provided!")
-    if env is None:
-        if env_creation_fn is None:
-            env_creation_fn = gym.make
-        env = env_creation_fn(env_name)
-    done = False
-    observations, actions, rewards, log_probs, values, terminals = (
-        [],
-        [],
-        [],
-        [],
-        [],
-        [],
-    )
-    observation = env.reset()
-    with torch.no_grad():
-        while not done:
-            obs = torch.from_numpy(observation).unsqueeze(0).to(policy.device)
-            action, out = policy.act(obs)
-            critic_values = policy.critic(obs)
-            next_observation, reward, done, _ = env.step(action)
+def convert_to_torch(rollout, device):
+    steps = rollout.steps
+    num_envs = rollout.num_envs
+    num_steps = len(rollout)
+    # num_envs x ...
+    obs_shape = steps[0].observation.shape[1:]
 
-            observations.append(observation)
-            actions.append(action)
-            rewards.append(reward)
-            log_probs.append(out["log_probs"].detach().cpu().numpy())
-            values.append(critic_values.detach().cpu().numpy())
-            terminals.append(done)
+    if len(steps[0].action.shape) <= 1:
+        action_shape = ()
+    else:
+        action_shape = steps[0].action.shape[1:]
 
-            observation = next_observation
-    env.close()
+    obs = torch.zeros((num_steps, num_envs) + obs_shape).to(device)
+    actions = torch.zeros((num_steps, num_envs) + action_shape).to(device)
+    rewards = torch.zeros((num_steps, num_envs)).to(device)
+    dones = torch.zeros((num_steps, num_envs)).to(device)
+
+    infos = []
+    policy_outs = {}
+
+    for i, step in enumerate(steps):
+        obs[i, :] = torch.from_numpy(step.observation).to(device)
+        actions[i] = torch.Tensor(step.action).to(device)
+        rewards[i] = torch.from_numpy(step.reward).to(device)
+        dones[i] = torch.from_numpy(step.done).to(device)
+        infos.append(step.info)
+
+        for k in step.policy_output:
+            if k not in policy_outs:
+                policy_outs[k] = []
+            policy_outs[k].append(step.policy_output[k])
+
+    for k in policy_outs:
+        if isinstance(policy_outs[k], torch.Tensor):
+            policy_outs[k] = torch.stack(policy_outs[k]).to(device)
+
+    last_obs = torch.Tensor(rollout.last_obs).to(device)
+    last_done = torch.Tensor(rollout.last_done).to(device)
 
     return {
-        "observations": np.array(observations),
-        "actions": np.array(actions),
-        "rewards": np.array(rewards),
-        "log_probs": np.array(log_probs),
-        "values": np.array(values),
-        "terminals": np.array(terminals),
+        "obs": obs,
+        "actions": actions,
+        "rewards": rewards,
+        "dones": dones,
+        "infos": infos,
+        "policy_outs": policy_outs,
+        "last_obs": last_obs,
+        "last_done": last_done,
     }
 
 
-class PPOOptimizer(RLOptimizer):
+def get_returns_advantages(
+    rewards: torch.Tensor,
+    values: torch.Tensor,
+    dones: torch.Tensor,
+    last_value: torch.Tensor,
+    last_done: torch.Tensor,
+    gamma: float = 0.99,
+    gae_lambda: float = 0.95,
+):
+    with torch.no_grad():
+        num_steps = rewards.shape[0]
+        device = rewards.device
+        last_value = last_value.view(1, -1)
+        advantages = torch.zeros_like(rewards).to(device)
+        lastgaelam = 0
+        for t in reversed(range(num_steps)):
+            if t == num_steps - 1:
+                nextnonterminal = 1.0 - last_done
+                nextvalues = last_value
+            else:
+                nextnonterminal = 1.0 - dones[t + 1]
+                nextvalues = values[t + 1]
+            delta = rewards[t] + gamma * nextvalues * nextnonterminal - values[t]
+            advantages[t] = lastgaelam = (
+                delta + gamma * gae_lambda * nextnonterminal * lastgaelam
+            )
+        returns = advantages + values
+        return returns, advantages
+
+
+class PPOLossFunction:
     def __init__(
         self,
-        policy: ACPolicy,
-        pi_lr: float = 0.0005,
         vf_coef: float = 0.5,
-        entropy_weight: float = 0.01,
-        gamma: float = 0.99,
-        lam: float = 0.95,
+        ent_coef: float = 0.001,
         clip_ratio: float = 0.2,
-        num_rollouts: int = 1,
+        clip_vloss: bool = True,
+        norm_advantages: bool = True,
+    ):
+        self.vf_coef = vf_coef
+        self.ent_coef = ent_coef
+        self.clip_ratio = clip_ratio
+        self.clip_vloss = clip_vloss
+        self.norm_advantages = norm_advantages
+
+    def __call__(
+        self,
+        log_probs: torch.Tensor,
+        old_log_probs: torch.Tensor,
+        values: Optional[torch.Tensor],
+        returns: Optional[torch.Tensor],
+        advantages: Optional[torch.Tensor],
+        old_values: Optional[torch.Tensor] = None,
+        entropy: Optional[torch.Tensor] = None,
+    ):
+        if self.norm_advantages:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        logratio = log_probs - old_log_probs
+        ratio = logratio.exp()
+
+        # pgloss
+        pg_loss1 = -advantages * ratio
+        pg_loss2 = -advantages * torch.clamp(
+            ratio, 1 - self.clip_ratio, 1 + self.clip_ratio
+        )
+        pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+
+        # value loss
+        if self.clip_vloss and old_values is not None:
+            v_loss_unclipped = (values - returns) ** 2
+            v_clipped = old_values.detach() + torch.clamp(
+                values - old_values.detach(),
+                -self.clip_ratio,
+                self.clip_ratio,
+            )
+            v_loss_clipped = (v_clipped - returns) ** 2
+            v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
+            v_loss = 0.5 * v_loss_max.mean()
+        else:
+            v_loss = 0.5 * ((values - returns) ** 2).mean()
+
+        entropy_loss = entropy.mean()
+        loss = pg_loss - self.ent_coef * entropy_loss + self.vf_coef * v_loss
+        return loss, {
+            "pg_loss": pg_loss.item(),
+            "entropy_loss": entropy_loss.item(),
+            "v_loss": v_loss.item(),
+        }
+
+
+class PPOOptimizer:
+    def __init__(
+        self,
+        policy,
+        loss_fn,
+        num_minibatches: int = 4,
+        pi_lr: float = 2.5e-4,
+        n_updates: int = 4,
+        gamma: float = 0.99,
+        gae_lambda: float = 0.95,
+        max_grad_norm: float = 0.5,
     ):
         self.policy = policy
+        self.loss_fn = loss_fn
+        self.num_minibatches = num_minibatches
         self.pi_lr = pi_lr
-        self.vf_coef = vf_coef
-        self.entropy_weight = entropy_weight
+        self.n_updates = n_updates
         self.gamma = gamma
-        self.lam = lam
-        self.clip_ratio = clip_ratio
-        self.num_rollouts = num_rollouts
-        self.setup_optimizer()
+        self.gae_lambda = gae_lambda
+        self.max_grad_norm = max_grad_norm
 
-    def discount_rewards(self, rews: torch.Tensor) -> torch.Tensor:
-        n = len(rews)
-        rtgs = torch.zeros_like(rews)
-        for i in reversed(range(n)):
-            rtgs[i] = rews[i] + self.gamma * (rtgs[i + 1] if i + 1 < n else 0)
-        return rtgs
-
-    def setup_optimizer(self):
-        self.optimizer = optim.Adam(self.policy.parameters(), lr=self.pi_lr)
-
-    def calculate_advantages(
-        self,
-        returns: np.array,
-        values: np.array,
-        discount_factor: float,
-        normalize: bool = False,
-    ):
-
-        adv = returns - values
-        adv = np.squeeze(np.array(adv))
-
-        if normalize:
-            adv = (adv - np.mean(adv)) / np.std(adv)
-        return adv
-
-    def calculate_returns(
-        self,
-        rewards: np.array,
-        terminals: np.array,
-        discount_factor: float,
-        normalize: bool = True,
-    ):
-        returns = []
-        discounted_reward = 0
-
-        for r, terminal in zip(reversed(rewards), reversed(terminals)):
-            if terminal == 0:
-                discounted_reward = 0.0
-            discounted_reward = r + discounted_reward * discount_factor
-            returns.insert(0, discounted_reward)
-
-        returns = np.squeeze(np.array(returns))
-
-        if normalize:
-            returns = (returns - np.mean(returns)) / (np.std(returns) + 1e-7)
-        return returns
-
-    def value_loss(self, values, returns):
-        assert tuple(values.squeeze().size()) == tuple(returns.squeeze().size())
-        return F.mse_loss(returns.squeeze(), values.squeeze())
-
-    def actor_loss(self, log_probs, old_logprobs, advantages):
-        ratio = torch.exp(log_probs.squeeze() - old_logprobs.squeeze().detach())
-        assert tuple(ratio.size()) == tuple(advantages.size())
-        surr1 = ratio * advantages
-        surr2 = (
-            torch.clamp(ratio, 1.0 - self.clip_ratio, 1.0 + self.clip_ratio)
-            * advantages
+        # setup optimizer
+        self.optimizer = torch.optim.Adam(
+            self.policy.parameters(), lr=self.pi_lr, eps=1e-5
         )
-        loss_pi = -torch.min(surr1, surr2)
-        return loss_pi
 
-    def zero_grad(self):
-        self.optimizer.zero_grad()
-
-    def loss_fn(
+    def step(
         self,
-        observations: torch.Tensor,
-        actions: torch.Tensor,
-        returns: torch.Tensor,
-        advantages: torch.Tensor,
-        old_log_probs: torch.Tensor,
+        rollouts,
+        device,
     ):
+        num_envs = rollouts.num_envs
+        num_steps = len(rollouts)
+        batch_size = num_envs * num_steps
+        minibatch_size = int(batch_size // self.num_minibatches)
 
-        out = self.policy(observations)
-        dist = out["dist"]
-        log_probs = self.policy.log_prob(dist, actions)
-        actor_loss = self.actor_loss(log_probs, old_log_probs, advantages).mean()
+        rollouts = convert_to_torch(rollouts, device)
+        rewards = rollouts["rewards"].view(num_steps, num_envs)
+        np_rewards = rewards.detach().cpu().numpy()
 
-        values = self.policy.critic(observations)
-        value_loss = self.value_loss(values, returns).mean()
-
-        entropy_loss = dist.entropy().sum(1)
-
-        loss = (
-            actor_loss + self.vf_coef * value_loss - self.entropy_weight * entropy_loss
+        dones = rollouts["dones"]
+        old_values = (
+            torch.stack(rollouts["policy_outs"]["values"])
+            .detach()
+            .view(num_steps, num_envs)
         )
-        return loss.mean(), actor_loss, value_loss, entropy_loss
 
-    def step(self):
-        self.optimizer.step()
+        old_log_probs = torch.stack(rollouts["policy_outs"]["log_probs"]).detach()
+        observations = rollouts["obs"]
+        actions = rollouts["actions"]
 
-    def update(
-        self,
-        observations: torch.Tensor,
-        actions: torch.Tensor,
-        returns: torch.Tensor,
-        advantages: torch.Tensor,
-        log_probs: torch.Tensor,
-    ) -> Any:
-        losses = []
-        actor_losses = []
-        value_losses = []
-        for _ in range(self.train_pi_iters):
-            self.zero_grad()
-            loss, actor_loss, value_loss = self.loss_fn(
-                observations, actions, returns, advantages, log_probs
+        with torch.no_grad():
+            last_value = self.policy(rollouts["last_obs"])["values"]
+            last_done = rollouts["last_done"]
+            returns, advantages = get_returns_advantages(
+                rewards=rewards,
+                values=old_values,
+                dones=dones,
+                last_value=last_value,
+                last_done=last_done,
+                gamma=self.gamma,
+                gae_lambda=self.gae_lambda,
             )
-            loss.backward()
-            self.step()
-            losses.append(loss.item())
-            actor_losses.append(actor_loss.item())
-            value_losses.append(value_loss.item())
-        return np.array(losses), np.array(actor_losses), np.array(value_losses)
+            # flatten stuff
 
-    def rollout_fn(self):
-        return ppo_rollout
+        rewards = rewards.view(-1)
+        dones = dones.view(-1)
+        old_values = old_values.view(-1)
+        last_value = last_value.view(-1)
+        last_done = last_done.view(-1)
 
-    def rollout(
-        self, rollout_fn=None, pool=None, num_rollouts: int = 1, *args, **kwargs
-    ) -> Dict[str, np.array]:
-        """
-        Optional default rollout_fn for the algorithm.
-        """
-        if rollout_fn is None:
-            rollout_fn = ppo_rollout
-        if pool is None:
-            rollouts = [
-                rollout_fn(self.policy, *args, **kwargs) for _ in range(num_rollouts)
-            ]
-        else:
-            rollouts = list(
-                pool.starmap(
-                    [tuple(self.policy, *args, **kwargs) for _ in range(num_rollouts)]
+        observations = torch.flatten(observations, 0, 1)
+        old_log_probs = torch.flatten(old_log_probs, 0, 1)
+        actions = torch.flatten(actions, 0, 1)
+
+        returns = returns.view(
+            batch_size,
+        )
+        advantages = advantages.view(
+            batch_size,
+        )
+
+        #         print("observations", observations.shape)
+        #         print("old_log_probs", old_log_probs.shape)
+        #         print("actions", actions.shape)
+        #         print("returns", returns.shape)
+        #         print("advantages", advantages.shape)
+        #         print("rewards", rewards.shape)
+        #         print("dones", dones.shape)
+
+        b_inds = np.arange(batch_size)
+        for _ in range(self.n_updates):
+            np.random.shuffle(b_inds)
+            for start in range(0, batch_size, minibatch_size):
+                end = start + minibatch_size
+                mb_inds = b_inds[start:end]
+
+                self.optimizer.zero_grad()
+                out = self.policy(observations[mb_inds], actions[mb_inds])
+                log_probs = out["log_probs"].view(minibatch_size, -1)
+                entropy = out["entropy"].view(
+                    minibatch_size,
                 )
-            )
-        for r in rollouts:
-            r["returns"] = self.calculate_returns(
-                r["rewards"], r["terminals"], self.gamma, normalize=True
-            )
-            r["advantages"] = self.calculate_advantages(
-                r["returns"], r["values"], self.gamma, normalize=False
-            )
-        return rollouts
+                values = out["values"].view(
+                    minibatch_size,
+                )
+                loss, stats = self.loss_fn(
+                    log_probs=log_probs,
+                    old_log_probs=old_log_probs[mb_inds],
+                    values=values,
+                    old_values=old_values[mb_inds],
+                    returns=returns[mb_inds],
+                    advantages=advantages[mb_inds],
+                    entropy=entropy,
+                )
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+                self.optimizer.step()
+        return loss.item(), np_rewards, stats

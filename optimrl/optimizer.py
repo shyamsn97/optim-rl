@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import abc
-from typing import Any, Union
+from typing import Any, Dict, Tuple, Union
 
 import torch
 
@@ -13,6 +13,16 @@ class Loss(metaclass=abc.ABCMeta):
         pass
 
 
+class LossFunction(metaclass=abc.ABCMeta):
+    @abc.abstractmethod
+    def __call__(self, *args, **kwargs) -> Union[Loss, torch.Tensor, Any]:
+        """Loss
+
+        Returns:
+            _type_: _description_
+        """
+
+
 class RLOptimizer(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def zero_grad(self):
@@ -21,13 +31,21 @@ class RLOptimizer(metaclass=abc.ABCMeta):
         """
 
     @abc.abstractmethod
-    def loss_fn(self, *args, **kwargs) -> Union[Loss, torch.Tensor, Any]:
+    def loss(
+        self, data: Dict[str, Any]
+    ) -> Tuple[Union[torch.Tensor, Loss], Dict[str, Any]]:
         """
-        Calculate loss, passed into step function
+            Calculates loss on rollout
+
+        Args:
+            rollout (Rollout): _description_
+
+        Returns:
+            _type_: _description_
         """
 
     @abc.abstractmethod
-    def step(self) -> Any:
+    def step(self) -> None:
         """
         Updates parameters
         """
@@ -40,8 +58,12 @@ class RLOptimizer(metaclass=abc.ABCMeta):
         """
         return rollout_fn(*args, **kwargs)
 
-    def update(self, *args, **kwargs) -> Any:
+    def update(self, *args, **kwargs) -> Dict[str, Any]:
         self.zero_grad()
-        loss = self.loss_fn(*args, **kwargs)
+        loss, metrics = self.loss(*args, **kwargs)
         loss.backward()
         self.step()
+        return metrics
+
+    def __call__(self, *args, **kwargs) -> Dict[str, Any]:
+        return self.update(*args, **kwargs)
