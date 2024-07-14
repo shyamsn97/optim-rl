@@ -184,8 +184,13 @@ class PPOOptimizer(RLOptimizer):
                 mb_inds = b_inds[start:end]
 
                 self.optimizer.zero_grad()
-                out = self.policy(observations[mb_inds], actions[mb_inds])
-                log_probs = out["log_probs"].view(minibatch_size, -1).squeeze(dim=-1)
+                out = self.policy(observations[mb_inds])
+                log_probs = (
+                    out["dist"]
+                    .log_prob(actions[mb_inds])
+                    .view(minibatch_size, -1)
+                    .squeeze(dim=-1)
+                )
                 entropy = out["entropy"].view(
                     minibatch_size,
                 )
