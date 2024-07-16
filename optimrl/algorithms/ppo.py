@@ -7,6 +7,39 @@ import torch.nn as nn
 from optimrl.optimizer import LossFunction, RLOptimizer
 
 
+def get_returns_advantages(
+    rewards: torch.Tensor,
+    values: torch.Tensor,
+    dones: torch.Tensor,
+    gamma: float = 0.99,
+    normalize_returns: bool = False,
+    normalize_advantages: bool = True,
+):
+    with torch.no_grad():
+        returns = torch.zeros_like(rewards)
+        num_steps = returns.shape[0]
+
+        for t in reversed(range(num_steps)):
+            if t == num_steps - 1:
+                R = torch.zeros_like(rewards[t])
+            else:
+                R = returns[t + 1]
+            returns[t] = rewards[t] + (1.0 - dones[t]) * R * gamma
+
+        if normalize_returns:
+            # normalize over num_steps
+            returns = (returns - returns.mean(dim=0, keepdim=True)) / returns.std(
+                dim=0, keepdim=True
+            )
+
+        advantages = returns - values.detach()
+        if normalize_advantages:
+            advantages = (
+                advantages - advantages.mean(dim=0, keepdim=True)
+            ) / advantages.std(dim=0, keepdim=True)
+        return returns, advantages
+
+
 class PPOLossFunction(LossFunction):
     def __init__(
         self,
@@ -65,38 +98,161 @@ class PPOLossFunction(LossFunction):
             "v_loss": v_loss.item(),
         }
 
-    def get_returns_advantages(
+
+class RolloutGenerator:
+    def __init__(
         self,
-        rewards: torch.Tensor,
-        values: torch.Tensor,
-        dones: torch.Tensor,
-        gamma: float = 0.99,
-        normalize_returns: bool = False,
-        normalize_advantages: bool = True,
+        rollouts,
+        num_minibatches: int,
+        gamma: float,
+        norm_returns: bool,
+        norm_advantages: bool,
     ):
+        self.rollouts = rollouts
+        self.num_steps = rollouts["obs"].shape[0]
+        self.num_envs = rollouts["obs"].shape[1]
+        self.batch_size = self.num_envs * self.num_steps
+        self.num_minibatches = num_minibatches
+        self.gamma = gamma
+        self.norm_returns = norm_returns
+        self.norm_advantages = norm_advantages
+        self.minibatch_size = int(self.batch_size // self.num_minibatches)
+
+        self.rewards = rollouts["rewards"].view(self.num_steps, self.num_envs).detach()
+        self.np_rewards = self.rewards.detach().cpu().numpy()
+
+        self.dones = rollouts["dones"].view(self.num_steps, self.num_envs).detach()
+        self.old_values = (
+            torch.stack(rollouts["policy_outs"]["values"])
+            .detach()
+            .view(self.num_steps, self.num_envs)
+        )
+        self.old_log_probs = torch.stack(rollouts["policy_outs"]["log_probs"]).detach()
+        self.observations = rollouts["obs"].detach()
+        self.actions = rollouts["actions"].detach()
+
         with torch.no_grad():
-            returns = torch.zeros_like(rewards)
-            num_steps = returns.shape[0]
+            self.returns, self.advantages = get_returns_advantages(
+                rewards=self.rewards,
+                values=self.old_values,
+                dones=self.dones,
+                gamma=self.gamma,
+                normalize_returns=self.norm_returns,
+                normalize_advantages=self.norm_advantages,
+            )
+            # flatten stuff
 
-            for t in reversed(range(num_steps)):
-                if t == num_steps - 1:
-                    R = torch.zeros_like(rewards[t])
-                else:
-                    R = returns[t + 1]
-                returns[t] = rewards[t] + (1.0 - dones[t]) * R * gamma
+        self.rewards = self.rewards.view(-1)
+        self.dones = self.dones.view(-1)
+        self.old_values = self.old_values.view(-1)
 
-            if normalize_returns:
-                # normalize over num_steps
-                returns = (returns - returns.mean(dim=0, keepdim=True)) / returns.std(
-                    dim=0, keepdim=True
-                )
+        self.observations = torch.flatten(self.observations, 0, 1)
+        self.old_log_probs = torch.flatten(self.old_log_probs, 0, 1)
+        self.actions = torch.flatten(self.actions, 0, 1)
 
-            advantages = returns - values.detach()
-            if normalize_advantages:
-                advantages = (
-                    advantages - advantages.mean(dim=0, keepdim=True)
-                ) / advantages.std(dim=0, keepdim=True)
-            return returns, advantages
+        self.returns = self.returns.view(
+            self.batch_size,
+        )
+        self.advantages = self.advantages.view(
+            self.batch_size,
+        )
+
+    def create(self):
+        b_inds = np.arange(self.batch_size)
+        np.random.shuffle(b_inds)
+        for start in range(0, self.batch_size, self.minibatch_size):
+            end = start + self.minibatch_size
+            mb_inds = b_inds[start:end]
+            yield (
+                self.observations[mb_inds],
+                self.actions[mb_inds],
+                self.old_log_probs[mb_inds],
+                self.old_values[mb_inds],
+                self.returns[mb_inds],
+                self.advantages[mb_inds],
+            )
+
+
+class RecurrentRolloutGenerator:
+    def __init__(
+        self,
+        rollouts,
+        num_minibatches: int,
+        gamma: float,
+        norm_returns: bool,
+        norm_advantages: bool,
+    ):
+        self.rollouts = rollouts
+        self.num_steps = rollouts["obs"].shape[0]
+        self.num_envs = rollouts["obs"].shape[1]
+        self.num_minibatches = num_minibatches
+        self.batch_size = self.num_envs * self.num_steps
+        self.minibatch_size = int(self.batch_size // self.num_minibatches)
+        self.envsperbatch = self.num_envs // self.num_minibatches
+
+        self.gamma = gamma
+        self.norm_returns = norm_returns
+        self.norm_advantages = norm_advantages
+
+        self.rewards = rollouts["rewards"].view(self.num_steps, self.num_envs).detach()
+        self.np_rewards = self.rewards.detach().cpu().numpy()
+
+        self.dones = rollouts["dones"].view(self.num_steps, self.num_envs).detach()
+        self.old_values = (
+            torch.stack(rollouts["policy_outs"]["values"])
+            .detach()
+            .view(self.num_steps, self.num_envs)
+        )
+        self.old_log_probs = torch.stack(rollouts["policy_outs"]["log_probs"]).detach()
+        self.observations = rollouts["obs"].detach()
+        self.actions = rollouts["actions"].detach()
+
+        with torch.no_grad():
+            self.returns, self.advantages = get_returns_advantages(
+                rewards=self.rewards,
+                values=self.old_values,
+                dones=self.dones,
+                gamma=self.gamma,
+                normalize_returns=self.norm_returns,
+                normalize_advantages=self.norm_advantages,
+            )
+            # flatten stuff
+
+        # self.rewards = self.rewards.view(-1)
+        # self.dones = self.dones.view(-1)
+        # self.old_values = self.old_values.view(-1)
+
+        # self.observations = torch.flatten(self.observations, 0, 1)
+        # self.old_log_probs = torch.flatten(self.old_log_probs, 0, 1)
+        # self.actions = torch.flatten(self.actions, 0, 1)
+
+        # self.returns = self.returns.view(
+        #     self.batch_size,
+        # )
+        # self.advantages = self.advantages.view(
+        #     self.batch_size,
+        # )
+
+    def create(self):
+        envids = np.arange(self.num_envs)
+        np.random.shuffle(envids)
+        for start in range(0, self.num_envs, self.envsperbatch):
+            end = start + self.envsperbatch
+            mb_inds = envids[start:end]
+            yield (
+                self.observations[:, mb_inds],  # num_steps x num_envs x ...
+                torch.flatten(self.actions[:, mb_inds], 0, 1),
+                torch.flatten(self.old_log_probs[:, mb_inds], 0, 1),
+                self.old_values[:, mb_inds].view(
+                    self.minibatch_size,
+                ),
+                self.returns[:, mb_inds].view(
+                    self.minibatch_size,
+                ),
+                self.advantages[:, mb_inds].view(
+                    self.minibatch_size,
+                ),
+            )
 
 
 class PPOOptimizer(RLOptimizer):
@@ -112,6 +268,7 @@ class PPOOptimizer(RLOptimizer):
         max_grad_norm: float = 0.5,
         norm_returns: bool = False,
         norm_advantages: bool = True,
+        recurrent: bool = False,
     ):
         super().__init__(policy, loss_fn)
         self.num_minibatches = num_minibatches
@@ -122,6 +279,7 @@ class PPOOptimizer(RLOptimizer):
         self.max_grad_norm = max_grad_norm
         self.norm_returns = norm_returns
         self.norm_advantages = norm_advantages
+        self.recurrent = recurrent
 
         # setup optimizer
         self.optimizer = torch.optim.Adam(
@@ -132,81 +290,58 @@ class PPOOptimizer(RLOptimizer):
         self,
         rollouts,
     ):
-        num_steps = rollouts["obs"].shape[0]
-        num_envs = rollouts["obs"].shape[1]
-        batch_size = num_envs * num_steps
-        minibatch_size = int(batch_size // self.num_minibatches)
-
-        rewards = rollouts["rewards"].view(num_steps, num_envs).detach()
-        np_rewards = rewards.detach().cpu().numpy()
-
-        dones = rollouts["dones"].view(num_steps, num_envs).detach()
-        old_values = (
-            torch.stack(rollouts["policy_outs"]["values"])
-            .detach()
-            .view(num_steps, num_envs)
-        )
-        old_log_probs = torch.stack(rollouts["policy_outs"]["log_probs"]).detach()
-        observations = rollouts["obs"].detach()
-        actions = rollouts["actions"].detach()
-
-        with torch.no_grad():
-            returns, advantages = self.loss_fn.get_returns_advantages(
-                rewards=rewards,
-                values=old_values,
-                dones=dones,
+        if self.recurrent:
+            rollout_generator = RecurrentRolloutGenerator(
+                rollouts,
+                num_minibatches=self.num_minibatches,
                 gamma=self.gamma,
-                normalize_returns=self.norm_returns,
-                normalize_advantages=self.norm_advantages,
+                norm_returns=self.norm_returns,
+                norm_advantages=self.norm_advantages,
             )
-            # flatten stuff
+        else:
+            rollout_generator = RolloutGenerator(
+                rollouts,
+                num_minibatches=self.num_minibatches,
+                gamma=self.gamma,
+                norm_returns=self.norm_returns,
+                norm_advantages=self.norm_advantages,
+            )
 
-        rewards = rewards.view(-1)
-        dones = dones.view(-1)
-        old_values = old_values.view(-1)
-
-        observations = torch.flatten(observations, 0, 1)
-        old_log_probs = torch.flatten(old_log_probs, 0, 1)
-        actions = torch.flatten(actions, 0, 1)
-
-        returns = returns.view(
-            batch_size,
-        )
-        advantages = advantages.view(
-            batch_size,
-        )
-
-        b_inds = np.arange(batch_size)
         for _ in range(self.n_updates):
-            np.random.shuffle(b_inds)
-            for start in range(0, batch_size, minibatch_size):
-                end = start + minibatch_size
-                mb_inds = b_inds[start:end]
-
+            gen = rollout_generator.create()
+            for (
+                b_obs,
+                b_actions,
+                b_old_log_probs,
+                b_old_values,
+                b_returns,
+                b_advantages,
+            ) in gen:
                 self.optimizer.zero_grad()
-                out = self.policy(observations[mb_inds])
+                out = self.policy.train_forward(b_obs)
+                assert "dist" in out
                 log_probs = (
                     out["dist"]
-                    .log_prob(actions[mb_inds])
-                    .view(minibatch_size, -1)
+                    .log_prob(b_actions)
+                    .view(rollout_generator.minibatch_size, -1)
                     .squeeze(dim=-1)
                 )
                 entropy = out["entropy"].view(
-                    minibatch_size,
+                    rollout_generator.minibatch_size,
                 )
                 values = out["values"].view(
-                    minibatch_size,
+                    rollout_generator.minibatch_size,
                 )
                 loss, stats = self.loss_fn(
                     log_probs=log_probs,
-                    old_log_probs=old_log_probs[mb_inds],
+                    old_log_probs=b_old_log_probs,
                     values=values,
-                    old_values=old_values[mb_inds],
-                    returns=returns[mb_inds],
-                    advantages=advantages[mb_inds],
+                    old_values=b_old_values,
+                    returns=b_returns,
+                    advantages=b_advantages,
                     entropy=entropy,
                 )
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
                 self.optimizer.step()
-        return loss.item(), np_rewards, stats
+        return loss.item(), rollout_generator.np_rewards, stats

@@ -45,7 +45,7 @@ class Rollout:
         obs, infos = envs.reset(seed=seed)
         done = np.zeros((num_envs))
         env_steps = []
-        policy_out = None
+        policy_out = {}
         episodic_return = None
         for step in range(num_steps):
             with torch.no_grad():
