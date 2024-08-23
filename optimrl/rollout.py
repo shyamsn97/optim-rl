@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -16,6 +16,7 @@ class EnvStep:
     info: Dict[str, Any]
     policy_output: Dict[str, Any]
     step: int
+    renders: Optional[Any] = None
 
 
 @dataclass
@@ -23,9 +24,11 @@ class Rollout:
     steps: List[EnvStep]
     last_obs: Any
     last_done: Any
+    last_policy_out: Dict[str, Any]
     num_envs: int
     _stats: Any = None
     episodic_return: Any = None
+    renders: Any = None
 
     @property
     def stats(self):
@@ -39,43 +42,58 @@ class Rollout:
 
     @classmethod
     def rollout(
-        cls, envs, policy, num_steps: int, seed: int, evaluate: bool = False
+        cls,
+        envs,
+        policy,
+        num_steps: int,
+        seed: int,
+        policy_out={},
+        evaluate: bool = False,
+        render: bool = False,
     ) -> Rollout:
         num_envs = envs.num_envs
-        obs, infos = envs.reset(seed=seed)
-        done = np.zeros((num_envs))
+        next_obs, infos = envs.reset(seed=seed)
         env_steps = []
-        policy_out = {}
         episodic_return = None
+        renders = []
+        action = None
+        policy.eval()
         for step in range(num_steps):
-            with torch.no_grad():
-                action, policy_out = policy.act(obs, policy_out)
-            next_obs, reward, terminations, truncations, infos = envs.step(action)
-            done = np.logical_or(terminations, truncations)
-            env_step = EnvStep(
-                observation=obs,
-                action=action,
-                reward=reward,
-                done=done,
-                info=infos,
-                policy_output=policy_out,
-                step=step,
-            )
             obs = next_obs
-            if "final_info" in infos:
-                for info in infos["final_info"]:
-                    if info and "episode" in info:
-                        episodic_return = info["episode"]["r"]
-            env_steps.append(env_step)
-            if evaluate:
-                if done:
-                    break
+            with torch.no_grad():
+                action, policy_out = policy.act(obs, policy_out=policy_out)
+                if render:
+                    renders.append(envs.envs[0].render())
+                next_obs, reward, terminations, truncations, infos = envs.step(action)
+                done = np.logical_or(terminations, truncations)
+                env_step = EnvStep(
+                    observation=obs,
+                    action=action,
+                    reward=reward,
+                    done=done,
+                    info=infos,
+                    policy_output=policy_out,
+                    step=step,
+                )
+
+                if "final_info" in infos:
+                    for info in infos["final_info"]:
+                        if info and "episode" in info:
+                            episodic_return = info["episode"]["r"]
+                env_steps.append(env_step)
+                if evaluate:
+                    if done:
+                        break
+        with torch.no_grad():
+            _, last_policy_out = policy.act(next_obs, policy_out=policy_out)
         return cls(
             steps=env_steps,
             last_obs=next_obs,
             last_done=done,
+            last_policy_out=last_policy_out,
             num_envs=num_envs,
             episodic_return=episodic_return,
+            renders=renders,
         )
 
     def to_torch(self, device) -> Dict[str, Any]:
@@ -114,6 +132,12 @@ class Rollout:
             if isinstance(policy_outs[k], torch.Tensor):
                 policy_outs[k] = torch.stack(policy_outs[k]).to(device)
 
+        last_policy_out = {}
+        for k in self.last_policy_out:
+            last_policy_out[k] = self.last_policy_out[k]
+            if isinstance(last_policy_out[k], torch.Tensor):
+                last_policy_out[k] = last_policy_out[k].to(device)
+
         last_obs = torch.Tensor(self.last_obs).to(device)
         last_done = torch.Tensor(self.last_done).to(device)
 
@@ -126,4 +150,7 @@ class Rollout:
             "policy_outs": policy_outs,
             "last_obs": last_obs,
             "last_done": last_done,
+            "last_policy_out": last_policy_out,
+            "num_steps": len(self),
+            "num_envs": self.num_envs,
         }

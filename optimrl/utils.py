@@ -56,3 +56,50 @@ def flatten_list_of_dicts(
             else:
                 out[k].extend(d[k])
     return out
+
+
+def get_returns_advantages(
+    rewards: torch.Tensor,
+    values: torch.Tensor,
+    dones: torch.Tensor,
+    last_value: torch.Tensor,
+    gamma: float = 0.99,
+    lam: float = 0.95,
+    normalize_returns: bool = False,
+    normalize_advantages: bool = False,
+):
+    """Compute generalized advantage estimate.
+    rewards: a list of rewards at each step.
+    values: the value estimate of the state at each step.
+    episode_ends: an array of the same shape as rewards, with a 1 if the
+        episode ended at that step and a 0 otherwise.
+    gamma: the discount factor.
+    lam: the GAE lambda parameter.
+    """
+    with torch.no_grad():
+        T = rewards.shape[0]
+        N = rewards.shape[1]
+        gae_step = torch.zeros((N,))
+        advantages = torch.zeros((T, N))
+        values = values.detach()
+
+        for t in reversed(range(T)):
+            if t == (T - 1):
+                next_value = last_value
+            else:
+                next_value = values[t + 1, :]
+            delta = (
+                rewards[t, :] + (gamma * next_value * (1 - dones[t, :])) - values[t, :]
+            )
+            gae_step = delta + (gamma * lam * (1 - dones[t, :]) * gae_step)
+            # And store it
+            advantages[t, :] = gae_step
+
+        returns = advantages + values
+        if normalize_returns:
+            # normalize over num_steps
+            returns = (returns - returns.mean()) / (returns.std() + 1e-5)
+
+        if normalize_advantages:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-5)
+        return returns, advantages

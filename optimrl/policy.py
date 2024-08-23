@@ -50,7 +50,7 @@ class GymPolicy(nn.Module, Policy):
 
     @abc.abstractmethod
     def forward(
-        self, obs: torch.Tensor, prev_output: Dict[str, Any] = {}
+        self, obs: torch.Tensor, actions=None, policy_out: Dict[str, Any] = {}
     ) -> Dict[str, Any]:
         """Forward method of policy
 
@@ -64,7 +64,7 @@ class GymPolicy(nn.Module, Policy):
 
     @abc.abstractmethod
     def act(
-        self, obs: torch.Tensor, prev_output: Dict[str, Any] = {}
+        self, obs: torch.Tensor, actions=None, policy_out: Dict[str, Any] = {}
     ) -> Tuple[Any, Dict[str, Any]]:
         """Main act method
 
@@ -74,6 +74,6 @@ class GymPolicy(nn.Module, Policy):
         """
 
     def train_forward(
-        self, obs: torch.Tensor, prev_output: Dict[str, Any] = {}
+        self, obs: torch.Tensor, actions=None, policy_out: Dict[str, Any] = {}
     ) -> Dict[str, Any]:
-        return self.forward(obs=obs, prev_output=prev_output)
+        return self.forward(obs=obs, actions=actions, policy_out=policy_out)
