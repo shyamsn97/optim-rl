@@ -10,8 +10,8 @@ from einops import repeat
 from torch.distributions.normal import Normal
 from torch.nn.utils import parameters_to_vector, vector_to_parameters
 
-from optim_rl.optimizer import Loss, RLOptimizer
-from optim_rl.policy import GymPolicy
+from optimrl.optimizer import Loss, RLOptimizer
+from optimrl.policy import GymPolicy
 
 
 def es_rollout(policy: GymPolicy, env_name: str = None, env=None, env_creation_fn=None):
@@ -151,9 +151,6 @@ class ESOptimizer(RLOptimizer):
         return params, epsilon, mean
 
     def rollout(self, rollout_fn=None, pool=None, *args, **kwargs):
-        """
-        Optional default rollout_fn for the algorithm.
-        """
         if rollout_fn is None:
             rollout_fn = es_rollout
         perturbed_params, epsilon, mean = self.get_perturbed_params()

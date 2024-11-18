@@ -1,14 +1,12 @@
 # optim-rl -- RL algorithms implemented as optimizers
 
-**Note: This library is experimental and currently under development**
-
-`optim-rl` is an RL framework where algorithms are implemented and interacted with like torch optimizers
+`optim-rl` is an RL framework where algorithms are implemented as simple and structured optimizers
 
 ### Example:
 
 ```python
-from optim_rl.policy import GymPolicy
-from optim_rl.algorithms.reinforce import ReinforceOptimizer
+from optimrl.policy import GymPolicy
+from optimrl.algorithms.reinforce import ReinforceOptimizer
 
 class CartPolePolicy(GymPolicy):
     def __init__(self):
